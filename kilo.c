@@ -4,12 +4,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
 // ctrl q to quit
 #define CTRL_KEY(k) ((k) & 0x1f)
+#define KILO_VERSION "0.0.1"
 
 // **** data ****
 struct editorConfig {
@@ -122,6 +124,27 @@ int getWindowsSize(int *rows, int *cols) {
   }
 }
 
+// **** append buffer ****
+struct abuf {
+  char *b; // dynamic, may change depending on what we are appending
+  int len;
+};
+
+#define ABUF_INIT {NULL, 0};
+
+void abAppend(struct abuf *ab, const char *s,
+              int len) {                     // dynamic resize of buffer
+  char *new = realloc(ab->b, ab->len + len); // realloc new block if too big
+
+  if (new == NULL) // allocation failure
+    return;
+  memcpy(&new[ab->len], s, len);
+  ab->b = new;
+  ab->len += len;
+}
+
+void abFree(struct abuf *ab) { free(ab->b); }
+
 // **** input ****
 void editorProcessKeypress() {
   char c = editorReadKey();
@@ -135,13 +158,32 @@ void editorProcessKeypress() {
 }
 
 // **** output ****
-void editorDrawRows() {
+//
+// draws tilde rows based off of screen size
+void editorDrawRows(struct abuf *ab) {
   int y;
-  for (y = 0; y < E.screencols; y++) {
-    write(STDIN_FILENO, "~", 1);
+  for (y = 0; y < E.screenrows; y++) {
+    if (y == E.screenrows / 3) {
+      char welcome[80];
+      int welcomelen = snprintf(welcome, sizeof(welcome),
+                                "Kilo editor -- version %s", KILO_VERSION);
+      if (welcomelen > E.screencols)
+        welcomelen = E.screencols;
+      int padding = (E.screencols - welcomelen) / 2;
+      if (padding) {
+        abAppend(ab, "~", 1);
+        padding--;
+      }
+      while (padding--)
+        abAppend(ab, " ", 1);
+      abAppend(ab, welcome, welcomelen);
+    } else {
+      abAppend(ab, "~", 1);
+    }
+    abAppend(ab, "\x1b[K", 3);
 
     if (y < E.screencols - 1) {
-      write(STDIN_FILENO, "\r\n", 2);
+      abAppend(ab, "\r\n", 2);
     }
   }
 }
@@ -149,14 +191,19 @@ void editorDrawRows() {
 void editorRefreshScreen() {
   // escape sequences for drawing editor
   // clear entire screen
-  write(STDOUT_FILENO, "\x1b[2J", 4);
+  struct abuf ab = ABUF_INIT;
+
+  abAppend(&ab, "\x1b[?25l", 6); // hide cursor before drawing
 
   // position cursor in the top left
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[H", 3);
 
-  editorDrawRows();
+  editorDrawRows(&ab);
 
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[?25h", 6); // re enable cursor
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 
 // **** init ****
